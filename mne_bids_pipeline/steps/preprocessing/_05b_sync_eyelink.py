@@ -250,7 +250,7 @@ def sync_eyelink(
             duration=raw_et.annotations.duration,
             description=raw_et.annotations.description,
             ch_names=raw_et.annotations.ch_names,
-            extras=raw_et.annotations.extras
+            **({"extras": getattr(raw_et.annotations, "extras", None)} if hasattr(raw_et.annotations, "extras") else {}),
         )
 
         raw.set_annotations(raw.annotations + et_shifted)
