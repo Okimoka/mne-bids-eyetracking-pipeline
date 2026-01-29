@@ -121,26 +121,43 @@ def get_input_fnames_sync_eyelink(
 
     # _update_for_splits(in_files, key, single=True) # TODO: Find out if we need to add this or not
 
-    if not os.path.isfile(et_bids_basename):
-        logger.info(**gen_log_kwargs(message=f"Couldn't find {et_bids_basename} file. Trying suffix='physio' before checking .edf."))
-        et_bids_basename.update(suffix="physio")
+    # filename formats to check (suffix, extension)
+    variants = [
+        ("et", ".asc"),
+        ("physio", ".asc"),
+        ("et", ".edf"),
+        ("physio", ".edf"),
+    ]
 
+    for suffix, ext in variants:
+        candidate = et_bids_basename.copy().update(suffix=suffix, extension=ext)
 
-        if not os.path.isfile(et_bids_basename):
-            logger.info(**gen_log_kwargs(message=f"Also couldn't find {et_bids_basename}; checking .edf for suffix='et'."))
-            et_bids_basename.update(suffix="et",extension=".edf")
+        if os.path.isfile(candidate.fpath):
+            key = f"et_run-{run}"
+            in_files[key] = candidate
+            return in_files
 
-            if not os.path.isfile(et_bids_basename):
-                et_bids_basename.update(suffix="physio")
-                logger.error(**gen_log_kwargs(message=f"Also didn't find {et_bids_basename} file, last try, edf with suffix _physio"))
-                if not os.path.isfile(et_bids_basename):
-                    logger.error(**gen_log_kwargs(message=f"Also didn't find {et_bids_basename} file, one of both needs to exist for ET sync."))
-                    raise FileNotFoundError(f"For run {run}, could neither find .asc or .edf eye-tracking file. Please double-check the file names.")
+        if suffix == "et" and ext == ".asc":
+            logger.info(**gen_log_kwargs(
+                message=f"Couldn't find {candidate} file. Trying suffix='physio' before checking .edf."
+            ))
+        elif suffix == "physio" and ext == ".asc":
+            logger.info(**gen_log_kwargs(
+                message=f"Also couldn't find {candidate}; checking .edf for suffix='et'."
+            ))
+        elif suffix == "et" and ext == ".edf":
+            logger.error(**gen_log_kwargs(
+                message=f"Also didn't find {candidate} file, last try, edf with suffix _physio"
+            ))
 
-    key = f"et_run-{run}"
-    in_files[key] = et_bids_basename
-  
-    return in_files
+    # previous three candidates failed
+    logger.error(**gen_log_kwargs(
+        message=f"Also didn't find {candidate} file, one of both needs to exist for ET sync."
+    ))
+    raise FileNotFoundError(
+        f"For run {run}, could neither find .asc or .edf eye-tracking file. "
+        f"Please double-check the file names."
+    )
 
 
 
@@ -233,26 +250,24 @@ def sync_eyelink(
     raw_et.annotations.description = np.array(list(map(lambda desc: "ET_" + desc, raw_et.annotations.description)))
     
     
-    raw.set_annotations(mne.annotations._combine_annotations(raw.annotations,
-                                                                raw_et.annotations,
-                                                                0,
-                                                                raw.first_samp,
-                                                                raw_et.first_samp,
-                                                                raw.info["sfreq"]))
+    #raw.set_annotations(mne.annotations._combine_annotations(raw.annotations,
+    #                                                            raw_et.annotations,
+    #                                                            0,
+    #                                                            raw.first_samp,
+    #                                                            raw_et.first_samp,
+    #                                                            raw.info["sfreq"]))
     
-    # the following code requires mne 1.11 - but there is a bug in reading eyelink-asc files so we cant use it
-    #shift = (raw.first_samp - raw_et.first_samp) / raw.info["sfreq"]
+    shift = (raw.first_samp - raw_et.first_samp) / raw.info["sfreq"]
 
-    #et_shifted = mne.Annotations(
-    #    onset=raw_et.annotations.onset + shift, # shift ET annotations to match EEG
-    #    orig_time=raw.annotations.orig_time, # match orig_time to raw EEG
-    #    duration=raw_et.annotations.duration,
-    #    description=raw_et.annotations.description,
-    #    ch_names=raw_et.annotations.ch_names,
-    #    extras=raw_et.annotations.extras
-    #)
-
-    #raw.set_annotations(raw.annotations + et_shifted)
+    et_shifted = mne.Annotations(
+        onset=raw_et.annotations.onset + shift, # shift ET annotations to match EEG
+        orig_time=raw.annotations.orig_time, # match orig_time to raw EEG
+        duration=raw_et.annotations.duration,
+        description=raw_et.annotations.description,
+        ch_names=raw_et.annotations.ch_names,
+        # extras for mne>=1.11, for older versions this attribute is skipped
+        **({"extras": getattr(raw_et.annotations, "extras", None)} if hasattr(raw_et.annotations, "extras") else {})
+    )
     
     msg = f"Saving synced data to disk."
     logger.info(**gen_log_kwargs(message=msg))
