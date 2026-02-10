@@ -121,27 +121,43 @@ def get_input_fnames_sync_eyelink(
 
     # _update_for_splits(in_files, key, single=True) # TODO: Find out if we need to add this or not
 
-    if not os.path.isfile(et_bids_basename):
-        logger.info(**gen_log_kwargs(message=f"Couldn't find {et_bids_basename} file. Trying suffix='physio' before checking .edf."))
-        et_bids_basename.update(suffix="physio")
+    # filename formats to check (suffix, extension)
+    variants = [
+        ("et", ".asc"),
+        ("physio", ".asc"),
+        ("et", ".edf"),
+        ("physio", ".edf")
+    ]
 
+    for suffix, ext in variants:
+        candidate = et_bids_basename.copy().update(suffix=suffix, extension=ext)
 
-        if not os.path.isfile(et_bids_basename):
-            logger.info(**gen_log_kwargs(message=f"Also couldn't find {et_bids_basename}; checking .edf for suffix='et'."))
-            et_bids_basename.update(suffix="et",extension=".edf")
+        if os.path.isfile(candidate.fpath):
+            key = f"et_run-{run}"
+            in_files[key] = candidate
+            return in_files
 
-            if not os.path.isfile(et_bids_basename):
-                logger.error(**gen_log_kwargs(message=f"Also didn't find {et_bids_basename} file, last try, edf with suffix _physio"))
-                et_bids_basename.update(suffix="physio")
-                if not os.path.isfile(et_bids_basename):
-                    logger.error(**gen_log_kwargs(message=f"Also didn't find {et_bids_basename} file, one of both needs to exist for ET sync."))
-                    raise FileNotFoundError(f"For run {run}, could neither find .asc or .edf eye-tracking file. Please double-check the file names.")
+        if suffix == "et" and ext == ".asc":
+            logger.info(**gen_log_kwargs(
+                message=f"Couldn't find {candidate} file. Trying suffix='physio' before checking .edf."
+            ))
+        elif suffix == "physio" and ext == ".asc":
+            logger.info(**gen_log_kwargs(
+                message=f"Also couldn't find {candidate}; checking .edf for suffix='et'."
+            ))
+        elif suffix == "et" and ext == ".edf":
+            logger.info(**gen_log_kwargs(
+                message=f"Also didn't find {candidate} file, checking .edf with suffix _physio"
+            ))
 
-    key = f"et_run-{run}"
-    in_files[key] = et_bids_basename
-  
-    return in_files
-
+    # previous candidates all failed
+    logger.error(**gen_log_kwargs(
+        message=f"Also didn't find {candidate} file, no valid files exist for ET sync."
+    ))
+    raise FileNotFoundError(
+        f"For run {run}, could neither find .asc nor .edf eye-tracking file. "
+        f"Please double-check the file names."
+    )
 
 
 @failsafe_run(
@@ -187,14 +203,16 @@ def sync_eyelink(
 
     et_format = et_fname.extension
 
-    if not et_format == '.asc':
-        assert et_format == '.edf', "ET file is neither an `.asc` nor an `.edf`. This should not have happened."
+    if et_format == '.edf':
         logger.info(**gen_log_kwargs(message=f"Converting {et_fname} file to `.asc` using edf2asc."))
         import subprocess
         subprocess.run(["edf2asc", et_fname]) # TODO: Still needs to be tested
         et_fname.update(extension='.asc')
-
-    raw_et = mne.io.read_raw_eyelink(et_fname, find_overlaps=False) # TODO: Make find_overlaps optional
+        raw_et = mne.io.read_raw_eyelink(et_fname, find_overlaps=False) # TODO: Make find_overlaps optional
+    elif et_format == '.asc':
+        raw_et = mne.io.read_raw_eyelink(et_fname, find_overlaps=False) # TODO: Make find_overlaps optional
+    else:
+        raise AssertionError("ET file is neither an `.asc` nor an `.edf`. This should not have happened.")
 
     # If the user did not specify a regular expression for the eye-tracking sync events, it is assumed that it's
     # identical to the regex for the EEG sync events
