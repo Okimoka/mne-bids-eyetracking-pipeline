@@ -239,6 +239,11 @@ def sync_eyelink(
 
     #mne.preprocessing.eyetracking.interpolate_blinks(raw_et, buffer=(0.05, 0.05), interpolate_gaze=True)        
 
+    # realign_raw behaves unexpectedly if no meas_date is set
+    if raw.info["meas_date"] is None:
+        raw.set_meas_date(946684800) # use Jan 1st 2000 as dummy (default anonymized meas_date)
+    raw_et.set_meas_date(raw.info["meas_date"])
+
     # Align the data
     mne.preprocessing.realign_raw(raw, raw_et, sync_times, et_sync_times)
 
@@ -250,27 +255,26 @@ def sync_eyelink(
     # TODO: For now all ET events will be marked with ET and added to the EEG annotations, maybe later filter for certain events only
     raw_et.annotations.description = np.array(list(map(lambda desc: "ET_" + desc, raw_et.annotations.description)))
     
+    #avoid calling internal function _combine_annotations
+    #raw.set_annotations(mne.annotations._combine_annotations(raw.annotations,
+    #                                                            raw_et.annotations,
+    #                                                            0,
+    #                                                            raw.first_samp,
+    #                                                            raw_et.first_samp,
+    #                                                            raw.info["sfreq"]))
     
-    raw.set_annotations(mne.annotations._combine_annotations(raw.annotations,
-                                                                raw_et.annotations,
-                                                                0,
-                                                                raw.first_samp,
-                                                                raw_et.first_samp,
-                                                                raw.info["sfreq"]))
-    
-    # the following code requires mne 1.11 - but there is a bug in reading eyelink-asc files so we cant use it
-    #shift = (raw.first_samp - raw_et.first_samp) / raw.info["sfreq"]
+    shift = (raw.first_samp - raw_et.first_samp) / raw.info["sfreq"]
 
-    #et_shifted = mne.Annotations(
-    #    onset=raw_et.annotations.onset + shift, # shift ET annotations to match EEG
-    #    orig_time=raw.annotations.orig_time, # match orig_time to raw EEG
-    #    duration=raw_et.annotations.duration,
-    #    description=raw_et.annotations.description,
-    #    ch_names=raw_et.annotations.ch_names,
-    #    extras=raw_et.annotations.extras
-    #)
-
-    #raw.set_annotations(raw.annotations + et_shifted)
+    et_shifted = mne.Annotations(
+        onset=raw_et.annotations.onset + shift, # shift ET annotations to match EEG
+        orig_time=raw.annotations.orig_time, # match orig_time to raw EEG
+        duration=raw_et.annotations.duration,
+        description=raw_et.annotations.description,
+        ch_names=raw_et.annotations.ch_names,
+        # extras for mne>=1.11, for older versions this attribute is skipped
+        **({"extras": getattr(raw_et.annotations, "extras", None)} if hasattr(raw_et.annotations, "extras") else {})
+    )
+    raw.set_annotations(raw.annotations + et_shifted)
     
     msg = f"Saving synced data to disk."
     logger.info(**gen_log_kwargs(message=msg))
