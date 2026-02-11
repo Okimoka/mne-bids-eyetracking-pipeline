@@ -1315,6 +1315,17 @@ When displaying HEOG-ET cross-correlation, constrict plotting to sync_plot_samps
     ```
 """
 
+sync_gauss_window: int | None = 800
+"""
+Half-window (in samples) used for the Gaussian fit overlay on the HEOG-ET cross-correlation. Set to None to disable the Gaussian overlay.
+
+???+ example "Example"
+    ```python
+    sync_gauss_window = 500   # fit within ±500 samples around the peak
+    sync_gauss_window = 200   # tighter/local fit around the peak
+    ```
+"""
+
 sync_calibration_string: str | None = ".* Recalibration (start|end) \\| (.*)"
 """
 Regular expression used for searching for calibration events
