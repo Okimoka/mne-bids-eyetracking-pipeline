@@ -239,6 +239,7 @@ def get_runs_all_subjects(
         bids_root=config.bids_root,
         data_type=config.data_type,
         ch_types=tuple(config.ch_types),
+        task=config.task,
         subjects=tuple(config.subjects) if config.subjects != "all" else "all",
         exclude_subjects=tuple(config.exclude_subjects),
         exclude_runs=tuple(config.exclude_runs) if config.exclude_runs else None,
@@ -252,6 +253,14 @@ def _get_runs_all_subjects_cached(
     config = SimpleNamespace(**config_dict)
     # Sometimes we check list equivalence for ch_types, so convert it back
     config.ch_types = list(config.ch_types)
+    ignore_tasks: tuple[str, ...] | None = None
+    if config.task:
+        all_tasks = _get_entity_vals_cached(
+            root=config.bids_root,
+            entity_key="task",
+            ignore_datatypes=_get_ignore_datatypes(config),
+        )
+        ignore_tasks = tuple(sorted(set(all_tasks) - set([config.task])))
     subj_runs: dict[str, tuple[None] | tuple[str, ...]] = dict()
     for subject in get_subjects(config):
         # Only traverse through the current subject's directory
@@ -259,6 +268,7 @@ def _get_runs_all_subjects_cached(
             config.bids_root / f"sub-{subject}",
             entity_key="run",
             ignore_datatypes=_get_ignore_datatypes(config),
+            ignore_tasks=ignore_tasks,
         )
 
         # If we don't have any `run` entities, just set it to None, as we
