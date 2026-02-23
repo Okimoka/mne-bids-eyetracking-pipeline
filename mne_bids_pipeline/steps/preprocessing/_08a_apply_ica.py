@@ -105,13 +105,11 @@ def get_input_fnames_apply_ica_raw(
         extension=".fif",
     )
     in_files = dict()
-    for run in cfg.runs:
-        key = f"raw_run-{run}"
-        in_files[key] = bids_basename.copy().update(
-            run=run, processing=cfg.processing, suffix="raw"
-        )
-        _update_for_splits(in_files, key, single=True)
-    assert len(in_files)
+    key = f"raw_run-{run}"
+    in_files[key] = bids_basename.copy().update(
+        run=run, processing=cfg.processing, suffix="raw"
+    )
+    _update_for_splits(in_files, key, single=True)
     in_files.update(_ica_paths(cfg=cfg, subject=subject, session=session))
     return in_files
 
