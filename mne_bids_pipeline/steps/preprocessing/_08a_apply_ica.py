@@ -292,8 +292,14 @@ def main(*, config: SimpleNamespace) -> None:
             for subject, session in ss
         )
         # Raw
+        raw_exec_params = config.exec_params
+        if getattr(config.exec_params, "n_jobs", 1) != 1:
+            # Report writers are shared across runs within a subject
+            # Limit to 1 to avoid attempts to read locked files
+            raw_exec_params = SimpleNamespace(**vars(config.exec_params))
+            raw_exec_params.n_jobs = 1
         parallel, run_func = parallel_func(
-            apply_ica_raw, exec_params=config.exec_params, n_iter=len(ssrt)
+            apply_ica_raw, exec_params=raw_exec_params, n_iter=len(ssrt)
         )
         logs += parallel(
             run_func(
@@ -301,7 +307,7 @@ def main(*, config: SimpleNamespace) -> None:
                     config=config,
                     subject=subject,
                 ),
-                exec_params=config.exec_params,
+                exec_params=raw_exec_params,
                 subject=subject,
                 session=session,
                 run=run,
