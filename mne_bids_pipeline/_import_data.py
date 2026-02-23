@@ -359,11 +359,11 @@ def _create_bipolar_channels(
         ):
             msg = "Setting channel type of new bipolar EOG channel(s) …"
             logger.info(**gen_log_kwargs(message=msg))
-        for eog_ch_name in cfg.eog_channels:
-            if eog_ch_name in cfg.eeg_bipolar_channels:
-                msg = f"    {eog_ch_name} -> eog"
-                logger.info(**gen_log_kwargs(message=msg))
-                raw.set_channel_types({eog_ch_name: "eog"})
+            for eog_ch_name in cfg.eog_channels:
+                if eog_ch_name in cfg.eeg_bipolar_channels:
+                    msg = f"    {eog_ch_name} -> eog"
+                    logger.info(**gen_log_kwargs(message=msg))
+                    raw.set_channel_types({eog_ch_name: "eog"})
 
 
 def _set_eeg_montage(
