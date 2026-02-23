@@ -282,16 +282,20 @@ a subset of them here, only this subset will be used during processing.
     ```
 """
 
-eeg_bipolar_channels: dict[str, tuple[str, str]] | None = None
+eeg_bipolar_channels: dict[str, tuple[str | list[str], str | list[str]]] | None = None
+
 """
 Combine two channels into a bipolar channel, whose signal is the **difference**
 between the two combined channels, and add it to the data.
 A typical use case is the combination of two EOG channels – for example, a
 left and a right horizontal EOG – into a single, bipolar EOG channel. You need
 to pass a dictionary whose **keys** are the name of the new bipolar channel you
-wish to create, and whose **values** are tuples consisting of two strings: the
-name of the channel acting as anode and the name of the channel acting as
-cathode, i.e. `{'ch_name': ('anode', 'cathode')}`. You can request
+wish to create, and whose **values** are tuples with two entries:
+`(anode, cathode)`. Each entry can be either a single channel name (`str`) or
+a list of channel names (`list[str]`) in fallback order. If a list is passed,
+the first channel that is present in the data and not marked bad (i.e., not in
+`raw.info["bads"]`) will be used. Example:
+`{'ch_name': (['anode_1', 'anode_2'], 'cathode')}`. You can request
 to construct more than one bipolar channel by specifying multiple key/value
 pairs. See the examples below.
 
@@ -305,13 +309,14 @@ Can also be `None` if you do not want to create bipolar channels.
     Combine the existing channels `HEOG_left` and `HEOG_right` into a new,
     bipolar channel, `HEOG`:
     ```python
-    eeg_add_bipolar_channels = {'HEOG': ('HEOG_left', 'HEOG_right')}
+    eeg_bipolar_channels = {'HEOG': ('HEOG_left', 'HEOG_right')}
     ```
 
-    Create two bipolar channels, `HEOG` and `VEOG`:
+    Create two bipolar channels, `HEOG` and `VEOG`, with fallback channels for
+    `HEOG`:
     ```python
-    eeg_add_bipolar_channels = {'HEOG': ('HEOG_left', 'HEOG_right'),
-                                'VEOG': ('VEOG_lower', 'VEOG_upper')}
+    eeg_bipolar_channels = {'HEOG': (['E8', 'E9', 'E10'], 'E25'),
+                            'VEOG': ('VEOG_lower', 'VEOG_upper')}
     ```
 """
 

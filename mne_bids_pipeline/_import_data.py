@@ -332,9 +332,42 @@ def _create_bipolar_channels(
     Modifies ``raw`` in-place.
     """
     if cfg.ch_types == ["eeg"] and cfg.eeg_bipolar_channels:
+        present_channels = set(raw.ch_names)
+        bad_channels = set(raw.info["bads"])
+
+        def _resolve_bipolar_channel(
+            channels: str | list[str], *, ch_name: str, side: Literal["anode", "cathode"]
+        ) -> str:
+            if isinstance(channels, str):
+                return channels
+            if not channels:
+                raise ValueError(
+                    f"Cannot create bipolar channel {ch_name!r}: {side} list is empty."
+                )
+
+            for candidate in channels:
+                if candidate in present_channels and candidate not in bad_channels:
+                    return candidate
+
+            for candidate in channels:
+                if candidate in present_channels:
+                    msg = (
+                        f"Using bad {side} channel {candidate!r} for bipolar channel "
+                        f"{ch_name!r} because all available fallback channels are bad."
+                    )
+                    logger.warning(**gen_log_kwargs(message=msg))
+                    return candidate
+
+            raise ValueError(
+                f"Cannot create bipolar channel {ch_name!r}: could not find {side} "
+                f"channel in {channels!r}."
+            )
+
         msg = "Creating bipolar channels …"
         logger.info(**gen_log_kwargs(message=msg))
         for ch_name, (anode, cathode) in cfg.eeg_bipolar_channels.items():
+            anode = _resolve_bipolar_channel(anode, ch_name=ch_name, side="anode")
+            cathode = _resolve_bipolar_channel(cathode, ch_name=ch_name, side="cathode")
             msg = f"    {anode} – {cathode} -> {ch_name}"
             logger.info(**gen_log_kwargs(message=msg))
             mne.set_bipolar_reference(
