@@ -332,42 +332,72 @@ def _create_bipolar_channels(
     Modifies ``raw`` in-place.
     """
     if cfg.ch_types == ["eeg"] and cfg.eeg_bipolar_channels:
-        present_channels = set(raw.ch_names)
-        bad_channels = set(raw.info["bads"])
-
-        def _resolve_bipolar_channel(
-            channels: str | list[str], *, ch_name: str, side: Literal["anode", "cathode"]
+        def _get_bipolar_ch(
+            *,
+            ch_name: str,
+            side: Literal["anode", "cathode"],
+            channels: str | list[str],
+            present_channels: set[str],
+            bad_channels: set[str],
         ) -> str:
             if isinstance(channels, str):
-                return channels
+                channels = [channels]
             if not channels:
                 raise ValueError(
                     f"Cannot create bipolar channel {ch_name!r}: {side} list is empty."
                 )
 
+            missing = list()
+            bad = list()
             for candidate in channels:
-                if candidate in present_channels and candidate not in bad_channels:
-                    return candidate
+                if candidate not in present_channels:
+                    missing.append(candidate)
+                    continue
+                if candidate in bad_channels:
+                    bad.append(candidate)
+                    continue
+                return candidate
 
-            for candidate in channels:
-                if candidate in present_channels:
-                    msg = (
-                        f"Using bad {side} channel {candidate!r} for bipolar channel "
-                        f"{ch_name!r} because all available fallback channels are bad."
-                    )
-                    logger.warning(**gen_log_kwargs(message=msg))
-                    return candidate
+            if bad:
+                selected_bad = bad[-1]
+                msg = (
+                    f"Using bad {side} channel {selected_bad!r} for bipolar channel "
+                    f"{ch_name!r} because all candidate channels are marked bad."
+                )
+                if missing:
+                    msg += f" Missing candidates: {missing!r}."
+                logger.warning(**gen_log_kwargs(message=msg))
+                return selected_bad
 
             raise ValueError(
-                f"Cannot create bipolar channel {ch_name!r}: could not find {side} "
-                f"channel in {channels!r}."
+                f"Cannot create bipolar channel {ch_name!r}: could not find a {side} "
+                f"channel in {channels!r} that exists in the data."
             )
 
         msg = "Creating bipolar channels …"
         logger.info(**gen_log_kwargs(message=msg))
-        for ch_name, (anode, cathode) in cfg.eeg_bipolar_channels.items():
-            anode = _resolve_bipolar_channel(anode, ch_name=ch_name, side="anode")
-            cathode = _resolve_bipolar_channel(cathode, ch_name=ch_name, side="cathode")
+        present_channels = set(raw.ch_names)
+        bad_channels = set(raw.info["bads"])
+        for ch_name, (anode_channels, cathode_channels) in cfg.eeg_bipolar_channels.items():
+            anode = _get_bipolar_ch(
+                ch_name=ch_name,
+                side="anode",
+                channels=anode_channels,
+                present_channels=present_channels,
+                bad_channels=bad_channels,
+            )
+            cathode = _get_bipolar_ch(
+                ch_name=ch_name,
+                side="cathode",
+                channels=cathode_channels,
+                present_channels=present_channels,
+                bad_channels=bad_channels,
+            )
+            if anode == cathode:
+                raise ValueError(
+                    f"Cannot create bipolar channel {ch_name!r}: resolved anode and "
+                    f"cathode to the same channel {anode!r}."
+                )
             msg = f"    {anode} – {cathode} -> {ch_name}"
             logger.info(**gen_log_kwargs(message=msg))
             mne.set_bipolar_reference(
@@ -867,7 +897,11 @@ def _read_bads_tsv(
     return out
 
 
-def _import_data_kwargs(*, config: SimpleNamespace, subject: str) -> dict[str, Any]:
+def _import_data_kwargs(
+    *,
+    config: SimpleNamespace,
+    subject: str,
+) -> dict[str, Any]:
     """Get config params needed for any raw data loading."""
     return dict(
         # import_experimental_data / general
@@ -909,7 +943,7 @@ def _import_data_kwargs(*, config: SimpleNamespace, subject: str) -> dict[str, A
         # args used for all runs that process raw (reporting / writing)
         plot_psd_for_runs=config.plot_psd_for_runs,
         _raw_split_size=config._raw_split_size,
-        runs=get_runs(config=config, subject=subject),  # XXX needs to accept session!
+        runs=get_runs(config=config, subject=subject),
         **_bids_kwargs(config=config),
     )
 

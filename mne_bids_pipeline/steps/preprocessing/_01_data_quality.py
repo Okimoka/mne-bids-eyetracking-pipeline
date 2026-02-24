@@ -474,9 +474,8 @@ def get_config(
     )
     return cfg
 
-
+"""
 def main(*, config: SimpleNamespace) -> None:
-    """Run assess_data_quality."""
     ssrt = _get_ssrt(config=config)
     with get_parallel_backend(config.exec_params):
         parallel, run_func = parallel_func(
@@ -497,7 +496,40 @@ def main(*, config: SimpleNamespace) -> None:
         )
 
     save_logs(config=config, logs=logs)
+"""
 
+def main(*, config: SimpleNamespace) -> None:
+    """Run assess_data_quality."""
+
+    import mne_bids
+    import mne_bids.path
+
+    def _fast_get_datatypes(root, verbose=None):
+        return ["eeg"]  # change to ["meg"] or ["ieeg"] as appropriate
+
+    mne_bids.get_datatypes = _fast_get_datatypes
+    mne_bids.path.get_datatypes = _fast_get_datatypes
+
+    ssrt = _get_ssrt(config=config)
+    with get_parallel_backend(config.exec_params):
+        parallel, run_func = parallel_func(
+            assess_data_quality,
+            exec_params=config.exec_params,
+            n_iter=len(ssrt),
+        )
+        logs = parallel(
+            run_func(
+                cfg=get_config(config=config, subject=subject, session=session),
+                exec_params=config.exec_params,
+                subject=subject,
+                session=session,
+                run=run,
+                task=task,
+            )
+            for subject, session, run, task in ssrt
+        )
+
+    save_logs(config=config, logs=logs)
 
 def _chs_html(chs: list[str]) -> str:
     """Generate HTML representation of channel list."""

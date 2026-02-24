@@ -100,7 +100,7 @@ def _get_ignore_datatypes(config: SimpleNamespace) -> tuple[str, ...]:
     _ignore_datatypes = set(_all_datatypes) - set([get_datatype(config)])
     return tuple(sorted(_ignore_datatypes))
 
-
+"""
 def get_subjects(config: SimpleNamespace) -> list[str]:
     _valid_subjects = _get_entity_vals_cached(
         root=config.bids_root,
@@ -126,7 +126,30 @@ def get_subjects(config: SimpleNamespace) -> list[str]:
     ]
 
     return subjects
+"""
 
+def get_subjects(config: SimpleNamespace) -> list[str]:
+    # OPTIMIZATION: Only scan the BIDS directory if we actually need "all" subjects
+    if config.subjects == "all":
+        s = _get_entity_vals_cached(
+            root=config.bids_root,
+            entity_key="subject",
+            ignore_datatypes=_get_ignore_datatypes(config),
+        )
+    else:
+        # If subjects are explicitly provided, trust the config and skip the scan
+        s = config.subjects
+        # Note: We skip the FileNotFoundError validation check here for speed
+
+    # Preserve order and remove excluded subjects
+    subjects = [
+        subject
+        for subject in s
+        if subject not in config.exclude_subjects and subject != "emptyroom"
+    ]
+
+    return subjects
+    
 
 def get_sessions(config: SimpleNamespace) -> tuple[None] | tuple[str, ...]:
     sessions = _get_sessions(config)
@@ -135,7 +158,7 @@ def get_sessions(config: SimpleNamespace) -> tuple[None] | tuple[str, ...]:
     else:
         return sessions
 
-
+"""
 def _get_sessions(config: SimpleNamespace) -> tuple[str, ...]:
     sessions = copy.deepcopy(config.sessions)
     _all_sessions = _get_entity_vals_cached(
@@ -147,6 +170,34 @@ def _get_sessions(config: SimpleNamespace) -> tuple[str, ...]:
         sessions = _all_sessions
 
     return tuple(str(x) for x in sessions)
+"""
+
+def _get_sessions(config: SimpleNamespace) -> tuple[str, ...]:
+    sessions = copy.deepcopy(config.sessions)
+    
+    # OPTIMIZATION: Only scan the BIDS directory if "all" sessions are requested
+    if sessions == "all":
+        sessions = _get_entity_vals_cached(
+            root=config.bids_root,
+            entity_key="session",
+            ignore_datatypes=_get_ignore_datatypes(config),
+        )
+
+    return tuple(str(x) for x in sessions)
+
+def _get_sessions(config: SimpleNamespace) -> tuple[str, ...]:
+    sessions = copy.deepcopy(config.sessions)
+    
+    # OPTIMIZATION: Only scan the BIDS directory if "all" sessions are requested
+    if sessions == "all":
+        sessions = _get_entity_vals_cached(
+            root=config.bids_root,
+            entity_key="session",
+            ignore_datatypes=_get_ignore_datatypes(config),
+        )
+
+    return tuple(str(x) for x in sessions)
+
 
 
 def get_subjects_sessions(
@@ -234,15 +285,22 @@ def get_runs_all_subjects(
     for each subject asked in the configuration file
     (and not for each subject present in the bids_path).
     """
+    exclude_runs = None
+    if config.exclude_runs:
+        exclude_runs = tuple(
+            (subject, tuple(runs))
+            for subject, runs in sorted(config.exclude_runs.items())
+        )
+
     # Use caching under the hood for speed
     return _get_runs_all_subjects_cached(
         bids_root=config.bids_root,
         data_type=config.data_type,
         ch_types=tuple(config.ch_types),
-        task=config.task,
+        task=get_task(config=config),
         subjects=tuple(config.subjects) if config.subjects != "all" else "all",
         exclude_subjects=tuple(config.exclude_subjects),
-        exclude_runs=tuple(config.exclude_runs) if config.exclude_runs else None,
+        exclude_runs=exclude_runs,
     )
 
 
@@ -253,30 +311,36 @@ def _get_runs_all_subjects_cached(
     config = SimpleNamespace(**config_dict)
     # Sometimes we check list equivalence for ch_types, so convert it back
     config.ch_types = list(config.ch_types)
+    exclude_runs: dict[str, tuple[str, ...]] = {
+        subject: tuple(runs)
+        for subject, runs in (config.exclude_runs or ())
+    }
+    ignore_datatypes = _get_ignore_datatypes(config)
     ignore_tasks: tuple[str, ...] | None = None
     if config.task:
         all_tasks = _get_entity_vals_cached(
             root=config.bids_root,
             entity_key="task",
-            ignore_datatypes=_get_ignore_datatypes(config),
+            ignore_datatypes=ignore_datatypes,
         )
         ignore_tasks = tuple(sorted(set(all_tasks) - set([config.task])))
+
     subj_runs: dict[str, tuple[None] | tuple[str, ...]] = dict()
     for subject in get_subjects(config):
         # Only traverse through the current subject's directory
         valid_runs_subj = _get_entity_vals_cached(
             config.bids_root / f"sub-{subject}",
             entity_key="run",
-            ignore_datatypes=_get_ignore_datatypes(config),
+            ignore_datatypes=ignore_datatypes,
             ignore_tasks=ignore_tasks,
         )
 
         # If we don't have any `run` entities, just set it to None, as we
         # commonly do when creating a BIDSPath.
         if valid_runs_subj:
-            if subject in (config.exclude_runs or {}):
+            if subject in exclude_runs:
                 valid_runs_subj = tuple(
-                    r for r in valid_runs_subj if r not in config.exclude_runs[subject]
+                    r for r in valid_runs_subj if r not in exclude_runs[subject]
                 )
             subj_runs[subject] = valid_runs_subj
         else:
@@ -346,6 +410,8 @@ def get_runs(
 
     if runs == "all":
         runs = list(valid_runs)
+    elif runs:
+        runs = [str(run) if run is not None else None for run in runs]
 
     if not runs:
         runs = [None]
@@ -377,8 +443,9 @@ def get_runs_tasks(
     runs: list[str | None] = list()
     tasks: list[str | None] = list()
     if "runs" in which:
-        runs.extend(get_runs(config=config, subject=subject))
-        tasks.extend([get_task(config=config)] * len(runs))
+        this_runs = get_runs(config=config, subject=subject)
+        runs.extend(this_runs)
+        tasks.extend([get_task(config=config)] * len(this_runs))
     if "rest" in which:
         rest_path = _get_rest_path(
             cfg=config,

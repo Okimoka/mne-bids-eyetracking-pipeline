@@ -9,7 +9,7 @@ import numpy as np
 
 from ._config_import import _import_config
 from ._config_template import create_template_config
-from ._config_utils import _get_step_modules
+from ._config_utils import _get_step_modules, get_subjects, get_subjects_sessions
 from ._logging import gen_log_kwargs, logger
 from ._parallel import get_parallel_backend
 from ._run import _short_step_path
@@ -239,6 +239,43 @@ def main() -> None:
         config_path=config_path,
         overrides=overrides,
     )
+    if config_imported.subjects == "all":
+        candidate_subjects = get_subjects(config_imported)
+        task_label = config_imported.task or "<all tasks>"
+        logger.info(
+            **gen_log_kwargs(
+                message=(
+                    "DEBUG: subjects='all' candidate subjects "
+                    f"(task={task_label}): {candidate_subjects}"
+                ),
+                emoji="🐛",
+            )
+        )
+
+        # Keep this startup debug logging non-intrusive: never fail the run.
+        try:
+            debug_config = SimpleNamespace(**vars(config_imported))
+            debug_config.allow_missing_sessions = True
+            subjects_with_data = tuple(get_subjects_sessions(debug_config).keys())
+            logger.info(
+                **gen_log_kwargs(
+                    message=(
+                        "DEBUG: subjects with matching data after task/session filtering "
+                        f"(task={task_label}): {subjects_with_data}"
+                    ),
+                    emoji="🐛",
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                **gen_log_kwargs(
+                    message=(
+                        "Could not compute startup task/session-filtered subject list "
+                        f"for debug output: {exc}"
+                    ),
+                    emoji="🐛",
+                )
+            )
     # Initialize dask now
     with get_parallel_backend(config_imported.exec_params):
         pass

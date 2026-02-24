@@ -8,6 +8,10 @@ from mne_bids import BIDSPath
 import pandas as pd
 from numpy.polynomial.polynomial import Polynomial
 from scipy.optimize import curve_fit
+from scipy.signal import correlate, find_peaks, peak_prominences
+import csv
+import json
+from collections import Counter
 
 from ..._config_utils import (
     _bids_kwargs,
@@ -25,6 +29,12 @@ from ..._reject import _get_reject
 from ..._report import _open_report
 from ..._run import _prep_out_files, _update_for_splits, failsafe_run, save_logs
 
+
+def ascii_sanitize(s: str) -> str:
+    s = (s.replace("°", "deg")
+           .replace("µ", "u")
+           .replace("²", "2"))
+    return s.encode("ascii", "ignore").decode("ascii")
 
 def gaussian(x, A, mu, sigma):
     return A * np.exp(- (x - mu)**2 / (2 * sigma**2))
@@ -160,8 +170,8 @@ def read_raw_iview(event_fname: str):
 
     #bad samples will be 0.00 on all these cols
     #comment these out to count number of nan samples
-    #zero_cols = header[3:11]
-    #et_nan_samples = int(df[zero_cols].eq(0).all(axis=1).sum())
+    zero_cols = header[3:11]
+    et_nan_samples = int(df[zero_cols].eq(0).all(axis=1).sum())
 
     #remove extra columns (usually Frame and Aux1)
     df = df.dropna(axis=1, how="all")
@@ -181,7 +191,7 @@ def read_raw_iview(event_fname: str):
     raw_et.set_annotations(annotations)
     raw_et._raw_extras = dummy_raw_extras
 
-    return raw_et
+    return raw_et, et_nan_samples
 
 def _check_HEOG_ET_vars(cfg):
     # helper function for sorting out heog and et channels
@@ -198,6 +208,76 @@ def _check_HEOG_ET_vars(cfg):
         et_ch = [cfg.sync_et_ch]
     
     return heog_ch, et_ch, bipolar
+
+def _select_eog_candidate(
+    candidates: str | list[str] | tuple[str, ...],
+    *,
+    present_channels: set[str],
+    bad_channels: set[str],
+) -> tuple[str | None, bool]:
+    if isinstance(candidates, str):
+        candidates = [candidates]
+    else:
+        candidates = list(candidates)
+
+    bad_candidates = list()
+    bad_candidate_indices = list()
+    for idx, candidate in enumerate(candidates):
+        if candidate not in present_channels:
+            continue
+        if candidate in bad_channels:
+            bad_candidates.append(candidate)
+            bad_candidate_indices.append(idx)
+            continue
+        if candidate in present_channels and candidate not in bad_channels:
+            return candidate, idx > 0
+
+    if bad_candidates:
+        return bad_candidates[-1], bad_candidate_indices[-1] > 0
+
+    return None, False
+
+def _get_eog_electrode_metrics(
+    *,
+    cfg: SimpleNamespace,
+    raw: mne.io.BaseRaw,
+) -> tuple[dict[str, str | None], dict[str, bool]]:
+    eog_electrodes_used: dict[str, str | None] = {
+        "HEOG_anode": None,
+        "HEOG_cathode": None,
+        "VEOG_anode": None,
+        "VEOG_cathode": None,
+    }
+    eog_electrode_is_fallback: dict[str, bool] = {
+        key: False for key in eog_electrodes_used
+    }
+
+    if not cfg.eeg_bipolar_channels:
+        return eog_electrodes_used, eog_electrode_is_fallback
+
+    present_channels = set(raw.ch_names)
+    bad_channels = set(raw.info["bads"])
+
+    for eog_name in ("HEOG", "VEOG"):
+        if eog_name not in cfg.eeg_bipolar_channels:
+            continue
+        anode_cfg, cathode_cfg = cfg.eeg_bipolar_channels[eog_name]
+        anode_used, anode_is_fallback = _select_eog_candidate(
+            anode_cfg,
+            present_channels=present_channels,
+            bad_channels=bad_channels,
+        )
+        cathode_used, cathode_is_fallback = _select_eog_candidate(
+            cathode_cfg,
+            present_channels=present_channels,
+            bad_channels=bad_channels,
+        )
+        eog_electrodes_used[f"{eog_name}_anode"] = anode_used
+        eog_electrode_is_fallback[f"{eog_name}_anode"] = anode_is_fallback
+        eog_electrodes_used[f"{eog_name}_cathode"] = cathode_used
+        eog_electrode_is_fallback[f"{eog_name}_cathode"] = cathode_is_fallback
+
+    return eog_electrodes_used, eog_electrode_is_fallback
 
 def _mark_calibration_as_bad(raw, cfg):
     # marks recalibration beginnings and ends as one bad segment
@@ -351,6 +431,28 @@ def sync_eyelink(
     out_files["eyelink_eeg"] = bids_basename.copy().update(processing="eyelink", suffix="raw")
     del bids_basename
 
+    participants_info = dict(
+        release_number=np.nan,
+        availability=np.nan
+    )
+
+    if os.path.isfile(cfg.bids_root / "participants.tsv"):
+        with (cfg.bids_root / "participants.tsv").open('r', encoding='utf-8', newline='') as f:
+            reader = csv.DictReader(f, delimiter='\t')
+            for row in reader:
+                if (row.get('participant_id') or '').strip() == f"sub-{subject}":
+
+                    release_val = (row.get('release_number') or '').strip()
+                    if release_val:
+                        participants_info['release_number'] = release_val
+
+                    # Update the value at column named by cfg.task if present/non-empty
+                    task_val = (row.get(cfg.task) or '').strip()
+                    if task_val:
+                        participants_info["availability"] = task_val
+
+
+
     # Ideally, this would be done in one of the previous steps where all folders are created (in `_01_init_derivatives_dir.py`). 
     logger.info(**gen_log_kwargs(message=f"Create `misc` folder for eye-tracking events."))
     out_dir_misc = cfg.deriv_root / f"sub-{subject}"
@@ -365,8 +467,12 @@ def sync_eyelink(
     msg = f"Syncing Eyelink ({et_fname.basename}) and EEG data ({raw_fname.basename})."
     logger.info(**gen_log_kwargs(message=msg))
     raw = mne.io.read_raw_fif(raw_fname, preload=True)
+    eog_electrodes_used, eog_electrode_is_fallback = _get_eog_electrode_metrics(
+        cfg=cfg, raw=raw
+    )
 
     et_format = et_fname.extension
+    nan_values = 0
 
     if et_format == '.edf':
         logger.info(**gen_log_kwargs(message=f"Converting {et_fname} file to `.asc` using edf2asc."))
@@ -377,9 +483,31 @@ def sync_eyelink(
     elif et_format == '.asc':
         raw_et = mne.io.read_raw_eyelink(et_fname, find_overlaps=False) # TODO: Make find_overlaps optional
     elif et_format == '.txt':
-        raw_et = read_raw_iview(et_fname)
+        raw_et, nan_values = read_raw_iview(et_fname)
     else:
         raise AssertionError("ET file is neither an `.asc` nor an `.edf` nor a `.txt`. This should not have happened.")
+
+
+    metrics = dict(
+        subject=subject,
+        release=participants_info["release_number"],
+        task=cfg.task,
+        availability=participants_info["availability"],
+        et_nan_values = nan_values,
+        eeg_sampling_rate_hz = raw.info["sfreq"],
+        et_sampling_rate_hz = raw_et.info["sfreq"],
+        eeg_channel_cnt = len(raw.ch_names),
+        eeg_bad_channel_count = len(raw.info["bads"]),
+        et_channel_cnt = len(raw_et.ch_names),
+        eog_electrode_used_HEOG_anode = eog_electrodes_used["HEOG_anode"],
+        eog_electrode_used_HEOG_cathode = eog_electrodes_used["HEOG_cathode"],
+        eog_electrode_used_VEOG_anode = eog_electrodes_used["VEOG_anode"],
+        eog_electrode_used_VEOG_cathode = eog_electrodes_used["VEOG_cathode"],
+        eog_electrode_is_fallback_HEOG_anode = eog_electrode_is_fallback["HEOG_anode"],
+        eog_electrode_is_fallback_HEOG_cathode = eog_electrode_is_fallback["HEOG_cathode"],
+        eog_electrode_is_fallback_VEOG_anode = eog_electrode_is_fallback["VEOG_anode"],
+        eog_electrode_is_fallback_VEOG_cathode = eog_electrode_is_fallback["VEOG_cathode"],
+    )
 
     # If the user did not specify a regular expression for the eye-tracking sync events, it is assumed that it's
     # identical to the regex for the EEG sync events
@@ -388,6 +516,7 @@ def sync_eyelink(
     
     et_sync_times = [annotation["onset"] for annotation in raw_et.annotations if re.search(cfg.sync_eventtype_regex_et,annotation["description"])]
     sync_times    = [annotation["onset"] for annotation in raw.annotations    if re.search(cfg.sync_eventtype_regex,   annotation["description"])]
+
     assert len(et_sync_times) == len(sync_times),f"Detected eyetracking and EEG sync events were not of equal size ({len(et_sync_times)} vs {len(sync_times)}). Adjust your regular expressions via 'sync_eventtype_regex_et' and 'sync_eventtype_regex' accordingly"
     assert len(sync_times) > 1,f"Not enough distinct sync events for realignment ({len(sync_times)})" #else realign_raw fails its regression
     #logger.info(**gen_log_kwargs(message=f"{et_sync_times}"))
@@ -410,9 +539,17 @@ def sync_eyelink(
     if raw.info["meas_date"] is None:
         raw.set_meas_date(946684800) # use Jan 1st 2000 as dummy (default anonymized meas_date)
     raw_et.set_meas_date(raw.info["meas_date"])
+    
 
+    et_pre_n, et_pre_f   = raw_et.n_times, float(raw_et.info["sfreq"])
+    eeg_pre_n, eeg_pre_f = raw.n_times, float(raw.info["sfreq"])
+    
     # Align the data
     mne.preprocessing.realign_raw(raw, raw_et, sync_times, et_sync_times)
+
+    metrics["et_samples_trimmed"]  = max(0, int(round(et_pre_n  - raw_et.n_times * (et_pre_f  / float(raw_et.info["sfreq"])))))
+    metrics["eeg_samples_trimmed"] = max(0, int(round(eeg_pre_n - raw.n_times    * (eeg_pre_f / float(raw.info["sfreq"])))))
+    raw_et.rename_channels(ascii_sanitize)
 
     # Add ET data to EEG
     raw.add_channels([raw_et], force_update_info=True)
@@ -549,15 +686,40 @@ def sync_eyelink(
         else: # None
             y_range = np.arange(len(corr))
             x_range = y_range - midpoint
+        xcorr_plot = corr[y_range]
 
         # gauss fit overlay
         if cfg.sync_gauss_window is not None:
-            A, mu, sigma, b = fit_gauss_to_xcorr(x_range, corr[y_range], cfg.sync_gauss_window)
-            axes[0, 0].plot(x_range, gaussian(x_range, A, mu, sigma) + b, linestyle="--", linewidth=2)
+            A, mu, sigma, b = fit_gauss_to_xcorr(x_range, xcorr_plot, cfg.sync_gauss_window)
+            gauss_plot = gaussian(x_range, A, mu, sigma) + b
+            axes[0, 0].plot(x_range, gauss_plot, linestyle="--", linewidth=2)
             caption += f"\nEstimated synchronisation delay (Gaussian peak) = {mu:.0f} samples ({mu/raw.info['sfreq']:.3f} s)."
+            metrics["gauss_A"] = float(A)
+            metrics["gauss_mu"] = float(mu)
+            metrics["gauss_sigma"] = float(sigma)
+            metrics["gauss_b"] = float(b)
+            denom_full = np.linalg.norm(xcorr_plot) * np.linalg.norm(gauss_plot)
+            metrics["gauss_xcorr_cosine_similarity_full"] = (
+                float(np.dot(xcorr_plot, gauss_plot) / denom_full) if denom_full > 0 else np.nan
+            )
+            metrics["gauss_xcorr_cosine_similarity_full_n"] = int(xcorr_plot.size)
+            # Compare fit quality in the central 95% bell region (mu ± 1.96*sigma),
+            # limited to the plotting window defined by sync_plot_samps.
+            bell_mask = np.abs(x_range - mu) <= (1.96 * sigma)
+            if np.any(bell_mask):
+                xcorr_bell = xcorr_plot[bell_mask]
+                gauss_bell = gauss_plot[bell_mask]
+                denom = np.linalg.norm(xcorr_bell) * np.linalg.norm(gauss_bell)
+                metrics["gauss_xcorr_cosine_similarity_95"] = (
+                    float(np.dot(xcorr_bell, gauss_bell) / denom) if denom > 0 else np.nan
+                )
+                metrics["gauss_xcorr_cosine_similarity_95_n"] = int(np.count_nonzero(bell_mask))
+            else:
+                metrics["gauss_xcorr_cosine_similarity_95"] = np.nan
+                metrics["gauss_xcorr_cosine_similarity_95_n"] = 0
 
         # plot
-        axes[0,0].plot(x_range, corr[y_range], color="black")
+        axes[0,0].plot(x_range, xcorr_plot, color="black")
         axes[0,0].axvline(linestyle="--", alpha=0.3)
         axes[0,0].set_title("Cross correlation HEOG and ET")
         axes[0,0].set_xlabel("Samples")
@@ -566,7 +728,72 @@ def sync_eyelink(
         delay_idx = abs(corr).argmax() - midpoint
         delay_time = delay_idx * (raw.times[1] - raw.times[0])
         caption += f"\nThere was an estimated synchronisation delay of {delay_idx} samples ({delay_time:.3f} seconds.)"
-    
+
+
+
+        
+        idx_all = find_peaks(corr)[0]
+        order = np.argsort(corr[idx_all])[::-1][:10]
+        idx = idx_all[order]
+        # save xcorr as artifact, for later analysis if needed
+        artifact = {
+            "xc_plot": xcorr_plot.astype(np.float16),
+            "heog_shape": heog_array.shape[1],
+            "xc_peak_indexes": idx.tolist(),
+            "xc_peak_heights": corr[idx].tolist(),
+            "xc_peak_prominences": peak_prominences(corr, idx)[0].tolist(),
+        }
+
+        # save in deriv folder of subject
+        deriv_root = cfg.deriv_root / f"sub-{subject}" / "eeg"
+        deriv_root.mkdir(parents=True, exist_ok=True)
+        artifact_fname = deriv_root / f"sub-{subject}_sync-eyelink_task-{cfg.task}_xcorr-artifact.npz"
+        np.savez_compressed(artifact_fname, **artifact)
+
+
+
+        # Record metrics from the same xcorr array used for plotting above.
+        metrics["xcorr_zero"] = float(corr[midpoint])
+        # TODO maybe adjust heights, prominence
+        peaks, props = find_peaks(corr, height=0, prominence=0)
+        order = np.argsort(corr[peaks])[::-1]  # sort peaks by height, desc
+        metrics["snr"] = np.nan
+
+        if isinstance(plot_samps, tuple):
+            limit_left, limit_right = int(plot_samps[0]), int(plot_samps[1])
+        else:
+            half_window = int(cfg.sync_gauss_window) if cfg.sync_gauss_window else len(corr) // 4
+            limit_left, limit_right = -half_window, half_window
+
+        left_edge = int(np.clip(midpoint + limit_left, 0, len(corr)))
+        right_edge = int(np.clip(midpoint + limit_right, 0, len(corr)))
+        if left_edge > right_edge:
+            left_edge, right_edge = right_edge, left_edge
+
+        noise_parts = []
+        if left_edge > 0:
+            noise_parts.append(corr[:left_edge])
+        if right_edge < len(corr):
+            noise_parts.append(corr[right_edge:])
+        noise_std = np.std(np.concatenate(noise_parts)) if noise_parts else 0.0
+
+        if peaks.size > 0:
+            j1 = peaks[order[0]]
+            metrics["xcorr_peak"] = float(corr[j1])
+            metrics["xcorr_peak_idx"] = int(j1 - midpoint)  # lag in samples
+            metrics["xcorr_peak_prominence"] = float(props["prominences"][order[0]])
+            if noise_std > 0:
+                metrics["snr"] = float(corr[j1] / noise_std)
+        if peaks.size > 1:
+            j2 = peaks[order[1]]
+            metrics["xcorr_second_peak"] = float(corr[j2])
+            metrics["xcorr_second_peak_idx"] = int(j2 - midpoint)  # lag in samples
+            metrics["xcorr_second_peak_prominence"] = float(props["prominences"][order[1]])
+
+
+
+
+
     # regression between synced events
     # we assume here that these annotations are sequential pairs of the same event in raw and et. otherwise this will break
     raw_onsets = [annot["onset"] for annot in raw.annotations if re.match("^(?!.*ET_)"+cfg.sync_eventtype_regex, annot["description"])]
@@ -574,6 +801,14 @@ def sync_eyelink(
  
     if len(raw_onsets) != len(et_onsets):
         raise ValueError(f"Lengths of raw {len(raw_onsets)} and ET {len(et_onsets)} onsets do not match.")
+    
+    metrics["shared_events"] = len(raw_onsets)
+    if len(raw_onsets) > 1:
+        sorted_raw_onsets = np.sort(np.asarray(raw_onsets, dtype=float))
+        metrics["longest_gap_between_events"] = float(np.max(np.diff(sorted_raw_onsets)))
+    else:
+        metrics["longest_gap_between_events"] = np.nan
+
     # regress and plot
     coef = np.polyfit(raw_onsets, et_onsets, 1)
     preds = np.poly1d(coef)(raw_onsets)
@@ -615,6 +850,80 @@ def sync_eyelink(
         )
         plt.close(fig)
         del caption
+
+
+
+    metrics["mean_abs_sync_error_ms"] = (float(np.mean(np.abs(resids))) * 1000.0 if resids.size > 0 else np.nan)
+    metrics["median_abs_sync_error_ms"] = (float(np.median(np.abs(resids))) * 1000.0 if resids.size > 0 else np.nan)
+
+    if len(raw_onsets):
+        _diff_samples_abs = np.abs((np.array(raw_onsets) - np.array(et_onsets)) * float(raw.info["sfreq"]))
+        metrics["within_1_sample"] = int(np.sum(_diff_samples_abs <= 1.0))
+        metrics["within_4_samples"] = int(np.sum(_diff_samples_abs <= 4.0))
+
+    # regression + correlation across all events
+    if len(raw_onsets):
+        _coef_all = np.polyfit(raw_onsets, et_onsets, 1)
+        metrics["regression_slope"] = float(_coef_all[0])
+        metrics["regression_intercept"] = float(_coef_all[1])
+
+
+    #print(raw_et.annotations["description"])
+    # Saccade stats
+    if getattr(raw_et, "annotations", None) is not None:
+
+        _is_saccade = np.array(["Saccade" in str(desc) for desc in raw_et.annotations.description], dtype=bool)
+        _is_fixation = np.array(["Fixation" in str(desc) for desc in raw_et.annotations.description], dtype=bool)
+        _is_blink = np.array(["Blink" in str(desc) for desc in raw_et.annotations.description], dtype=bool)
+        metrics["n_saccades"] = int(_is_saccade.sum())
+        metrics["n_blinks"] = int(_is_blink.sum())
+
+        metrics["avg_saccade_duration_ms"] = float(np.mean(np.asarray(raw_et.annotations.duration, float)[_is_saccade]) * 1000.0)
+        metrics["avg_fixation_duration_ms"] = float(np.mean(np.asarray(raw_et.annotations.duration, float)[_is_fixation]) * 1000.0)
+        metrics["avg_blink_duration_ms"] = float(np.mean(np.asarray(raw_et.annotations.duration, float)[_is_blink]) * 1000.0)
+        
+        #metrics["avg_saccade_amplitude"] = float(np.mean(np.asarray(raw_et.annotations.extra_5, float)[_is_saccade]))
+
+        anns = raw_et.annotations.to_data_frame()
+        filtered = anns.loc[pd.Series(_is_saccade, index=anns.index)]
+        try:
+            metrics["avg_saccade_amplitude"] = filtered["Amplitude"].mean()
+        except Exception as e:
+            print("Error computing avg_saccade_amplitude:", e)
+
+    ###metrics["snr"] = _compute_snr(raw, power_line_freq=60.0)
+
+    #n_saccades=np.nan,
+    #avg_saccade_amplitude=np.nan,
+    #avg_saccade_duration_ms=np.nan,
+    #avg_fixation_duration_ms=np.nan,
+
+    #n_blinks=np.nan,
+    #avg_blink_duration_ms=np.nan
+
+
+    metrics_bids = raw_fname.copy().update(
+        run=None, split=None,
+        processing="eyelink",
+        suffix="metrics",
+        extension=".json",
+    )
+    metrics_fname = out_dir_misc / metrics_bids.basename
+
+    metrics_fname.parent.mkdir(parents=True, exist_ok=True)
+
+    def _json_default(o):
+        if isinstance(o, (np.floating, np.integer)):
+            return o.item()
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        return str(o)
+
+    with open(metrics_fname, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2, default=_json_default)
+
+
+
     return _prep_out_files(exec_params=exec_params, out_files=out_files)
 
 
@@ -641,6 +950,7 @@ def get_config(
         sync_plot_samps = config.sync_plot_samps,
         sync_gauss_window = config.sync_gauss_window,
         sync_calibration_string = config.sync_calibration_string,
+        eeg_bipolar_channels = config.eeg_bipolar_channels,
         processing= "filt" if config.regress_artifact is None else "regress",
         _raw_split_size=config._raw_split_size,
 
