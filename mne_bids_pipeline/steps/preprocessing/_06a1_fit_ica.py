@@ -358,6 +358,12 @@ def get_config(
     subject: str,
     session: str | None = None,
 ) -> SimpleNamespace:
+    raw_processing = "filt" if config.regress_artifact is None else "regress"
+    ica_fit_processing = (
+        raw_processing
+        if config.sync_eyelink and config.ica_fit_use_pre_sync_data
+        else "eyelink" if config.sync_eyelink else raw_processing
+    )
     cfg = SimpleNamespace(
         conditions=config.conditions,
         runs=get_runs(config=config, subject=subject),
@@ -389,7 +395,7 @@ def get_config(
         eog_channels=config.eog_channels,
         rest_epochs_duration=config.rest_epochs_duration,
         rest_epochs_overlap=config.rest_epochs_overlap,
-        processing="eyelink" if config.sync_eyelink else "filt" if config.regress_artifact is None else "regress",
+        processing=ica_fit_processing,
         _epochs_split_size=config._epochs_split_size,
         **_bids_kwargs(config=config),
     )

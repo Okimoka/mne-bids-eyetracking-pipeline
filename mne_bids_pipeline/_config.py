@@ -1569,6 +1569,18 @@ epochs created to find heart beats and ocular artifacts.
     ```
 """  # noqa: E501
 
+ica_fit_use_pre_sync_data: bool = False
+"""
+Only relevant when [`sync_eyelink`][mne_bids_pipeline._config.sync_eyelink] is
+`True`.
+
+If set to `True`, the ICA fitting step will use the pre-sync raw data
+(`"filt"` or `"regress"` processing) instead of the time-aligned
+`"eyelink"` data. This can increase the amount of data available for ICA
+fitting.
+"""
+
+
 ica_algorithm: Literal[
     "picard", "fastica", "extended_infomax", "picard-extended_infomax"
 ] = "picard"
