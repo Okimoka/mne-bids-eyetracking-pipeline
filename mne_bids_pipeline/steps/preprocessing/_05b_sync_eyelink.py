@@ -386,8 +386,16 @@ def sync_eyelink(
     if not cfg.sync_eventtype_regex_et:
         cfg.sync_eventtype_regex_et = cfg.sync_eventtype_regex
     
-    et_sync_times = [annotation["onset"] for annotation in raw_et.annotations if re.search(cfg.sync_eventtype_regex_et,annotation["description"])]
-    sync_times    = [annotation["onset"] for annotation in raw.annotations    if re.search(cfg.sync_eventtype_regex,   annotation["description"])]
+    et_sync_times = [
+        annotation["onset"]
+        for annotation in raw_et.annotations
+        if re.fullmatch(cfg.sync_eventtype_regex_et, annotation["description"])
+    ]
+    sync_times = [
+        annotation["onset"]
+        for annotation in raw.annotations
+        if re.fullmatch(cfg.sync_eventtype_regex, annotation["description"])
+    ]
     assert len(et_sync_times) == len(sync_times),f"Detected eyetracking and EEG sync events were not of equal size ({len(et_sync_times)} vs {len(sync_times)}). Adjust your regular expressions via 'sync_eventtype_regex_et' and 'sync_eventtype_regex' accordingly"
     assert len(sync_times) > 1,f"Not enough distinct sync events for realignment ({len(sync_times)})" #else realign_raw fails its regression
     #logger.info(**gen_log_kwargs(message=f"{et_sync_times}"))
@@ -569,8 +577,18 @@ def sync_eyelink(
     
     # regression between synced events
     # we assume here that these annotations are sequential pairs of the same event in raw and et. otherwise this will break
-    raw_onsets = [annot["onset"] for annot in raw.annotations if re.match("^(?!.*ET_)"+cfg.sync_eventtype_regex, annot["description"])]
-    et_onsets = [annot["onset"] for annot in raw.annotations if re.match("ET_"+cfg.sync_eventtype_regex_et, annot["description"])]
+    raw_onsets = [
+        annot["onset"]
+        for annot in raw.annotations
+        if not annot["description"].startswith("ET_")
+        and re.fullmatch(cfg.sync_eventtype_regex, annot["description"])
+    ]
+    et_onsets = [
+        annot["onset"]
+        for annot in raw.annotations
+        if annot["description"].startswith("ET_")
+        and re.fullmatch(cfg.sync_eventtype_regex_et, annot["description"][3:])
+    ]
  
     if len(raw_onsets) != len(et_onsets):
         raise ValueError(f"Lengths of raw {len(raw_onsets)} and ET {len(et_onsets)} onsets do not match.")
