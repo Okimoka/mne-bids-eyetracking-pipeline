@@ -913,6 +913,13 @@ zapline_iter: bool = False
 Specifies if the iterative version of the Zapline algorithm should be run.
 """
 
+detect_freqs: Sequence[float] | None = None
+"""
+Optional list of candidate frequencies (in Hz) to test for narrow-band peaks in
+the PSD. Detected peaks are added to the standard notch filter for that run. If
+`None`, adaptive notch placement is disabled.
+"""
+
 notch_extra_kws: dict[str, Any] = {}
 """
 A dictionary of extra kwargs to pass to `mne.filter.notch_filter`. If kwargs
@@ -1578,8 +1585,10 @@ If set to `True`, the ICA fitting step will use the pre-sync raw data
 (`"filt"` or `"regress"` processing) instead of the time-aligned
 `"eyelink"` data. This can increase the amount of data available for ICA
 fitting.
-"""
 
+The default (`False`) retains the current behavior and fits ICA on
+`"eyelink"` data whenever eyelink syncing is enabled.
+"""
 
 ica_algorithm: Literal[
     "picard", "fastica", "extended_infomax", "picard-extended_infomax"
