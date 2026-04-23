@@ -89,13 +89,13 @@ def get_input_fnames_apply_ica_raw(
     cfg: SimpleNamespace,
     subject: str,
     session: str | None,
-    run: str,
+    run: str | None,
     task: str | None,
 ) -> InFilesT:
     bids_basename = BIDSPath(
         subject=subject,
         session=session,
-        task=cfg.task,
+        task=task or cfg.task,
         acquisition=cfg.acq,
         recording=cfg.rec,
         space=cfg.space,
@@ -213,8 +213,9 @@ def apply_ica_raw(
     in_files: InFilesT,
 ) -> OutFilesT:
     ica = _read_ica_and_exclude(in_files)
-    in_key = list(in_files)[0]
-    assert in_key.startswith("raw"), in_key
+    raw_keys = [key for key in in_files if key.startswith("raw")]
+    assert len(raw_keys) == 1, in_files
+    in_key = raw_keys[0]
     raw_fname = in_files.pop(in_key)
     assert len(in_files) == 0, in_files
     out_files = dict()
